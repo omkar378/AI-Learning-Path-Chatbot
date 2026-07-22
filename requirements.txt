@@ -1,0 +1,4 @@
+streamlit==1.47.1
+google-genai==1.28.0
+google-api-python-client==2.178.0
+python-dotenv==1.1.1
