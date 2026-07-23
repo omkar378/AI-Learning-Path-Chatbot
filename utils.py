@@ -1,3 +1,4 @@
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from google import genai
@@ -14,6 +15,44 @@ PREFERRED_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
 ]
+
+
+class GeminiQuotaError(RuntimeError):
+    """Raised when the configured Gemini project has no request quota left."""
+
+    def __init__(self, retry_after_seconds: Optional[int] = None):
+        message = (
+            "Gemini quota is exhausted for this API key. Check the project's "
+            "Gemini API quota/billing, use an API key from a project with quota, "
+            "or try again later."
+        )
+        if retry_after_seconds:
+            message += f" Gemini suggests retrying in about {retry_after_seconds} seconds."
+        super().__init__(message)
+
+
+def _is_quota_error(error: Exception) -> bool:
+    """Return True for Gemini HTTP 429/quota-exhausted errors."""
+    message = str(error).lower()
+    return "429" in message or "resource_exhausted" in message or "quota exceeded" in message
+
+
+def _retry_after_seconds(error: Exception) -> Optional[int]:
+    """Extract Gemini's optional retry delay from an API error message."""
+    match = re.search(
+        r"(?:retry(?:ing)?\s+in|retrydelay['\":\s]*)(\d+)",
+        str(error),
+        re.IGNORECASE,
+    )
+    if match:
+        return int(match.group(1))
+
+    error_text = str(error).lower()
+    for marker in ("retry in", "retrydelay"):
+        if marker in error_text:
+            numbers = re.findall("[0-9]+", error_text.split(marker, 1)[1])
+            return int(numbers[0]) if numbers else None
+    return None
 
 
 # -----------------------------------------
@@ -154,6 +193,38 @@ def build_download_text(
 
     return "\n".join(lines)
 
+
+def generate_fallback_learning_path(
+    user_goal: str,
+    youtube_api_key: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Create a useful roadmap when Gemini is temporarily unavailable."""
+    goal = user_goal.strip()
+    fallback_topics = [
+        f"Define your goal and set up the tools for {goal}",
+        "Learn the core concepts and essential vocabulary",
+        "Practice the fundamentals with short exercises",
+        "Apply the concepts to realistic examples",
+        "Build a small project and identify gaps",
+        "Review, improve the project, and plan next steps",
+    ]
+    structured_topics = []
+    for index, topic in enumerate(fallback_topics, start=1):
+        if progress_callback:
+            progress_callback(f"Preparing {topic}...")
+        videos = search_youtube_videos(
+            query=f"{goal} {topic} tutorial",
+            youtube_api_key=youtube_api_key or "",
+            max_results=3,
+        )
+        structured_topics.append({"day": f"Step {index}", "topic": topic, "videos": videos})
+    return {
+        "response_text": "Built-in learning roadmap",
+        "topics": structured_topics,
+        "download_text": build_download_text({"topics": structured_topics}),
+        "used_fallback": True,
+    }
 # -----------------------------------------
 # Generate Learning Path
 # -----------------------------------------
@@ -197,13 +268,18 @@ User Goal:
             break
 
         except Exception as e:
+            # Quota belongs to the API project, so trying another model only
+            # produces more failed requests and obscures the useful error.
+            if _is_quota_error(e):
+                raise GeminiQuotaError(_retry_after_seconds(e)) from e
             last_error = e
             continue
 
     if response is None:
         raise RuntimeError(
-            f"Unable to generate content.\nLast Error:\n{last_error}"
-        )
+            "Gemini could not generate content with the available models. "
+            "Verify your API key has access to Gemini and try again."
+        ) from last_error
 
     response_text = getattr(response, "text", "")
 

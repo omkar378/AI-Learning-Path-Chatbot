@@ -1,6 +1,10 @@
 import streamlit as st
 
-from utils import generate_learning_path
+from utils import (
+    GeminiQuotaError,
+    generate_fallback_learning_path,
+    generate_learning_path,
+)
 
 
 # ---------------- Page Configuration ----------------
@@ -133,12 +137,26 @@ if st.button(
         )
 
 
+    except GeminiQuotaError:
+        result = generate_fallback_learning_path(
+            user_goal=user_goal,
+            youtube_api_key=youtube_api_key,
+            progress_callback=lambda message: progress.info(message),
+        )
+        progress.empty()
+        st.session_state.generated_path = result
+        st.warning(
+            "Gemini is currently unavailable for this API key, so a built-in "
+            "roadmap was generated instead. Add quota or try again later for a "
+            "Gemini-personalized plan."
+        )
     except Exception as e:
 
         progress.empty()
 
         st.error(
-            f"❌ Error: {e}"
+            "❌ Could not generate the learning path. Please verify your Gemini "
+            "API key and try again."
         )
 
 
